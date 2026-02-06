@@ -1,8 +1,0 @@
-{
-  "name": "NoStruct",
-  "description": "A hallucination-inhibited, multi-functional educational AI assistant featuring real-time voice, search grounding, image/video analysis, and advanced reasoning.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
-}
