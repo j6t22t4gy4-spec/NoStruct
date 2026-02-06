@@ -145,7 +145,7 @@ export default function App() {
         setFolders(mappedFolders);
       }
 
-      // 세션(채팅) 불러오기
+      // 세션(채팅) 불러오기1
       const { data: sessionData, error: sessionError } = await supabase
         .from('general_data')
         .select('*')
