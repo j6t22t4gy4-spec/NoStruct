@@ -9,26 +9,7 @@ import {
   decodePCM, 
   decodeAudioData 
 } from './services/geminiService';
-import { auth, db, googleProvider } from './services/firebaseService';
-import { 
-  signInWithPopup, 
-  signOut, 
-  onAuthStateChanged, 
-  User as FirebaseUser 
-} from 'firebase/auth';
-import { 
-  collection, 
-  query, 
-  where, 
-  orderBy, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  doc, 
-  deleteDoc, 
-  setDoc,
-  Timestamp
-} from 'firebase/firestore';
+import { supabase } from './services/supabaseService';
 import { 
   ChatBubbleLeftRightIcon, 
   MicrophoneIcon, 
@@ -80,11 +61,15 @@ import {
   SparklesIcon
 } from '@heroicons/react/24/outline';
 
-// 메인 컴포넌트
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
+
+
 export default function App() {
   // === 상태 관리 ===
   const [mode, setMode] = useState<AppMode>(AppMode.CHAT); 
-  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null); 
+  const [currentUser, setCurrentUser] = useState<any>(null); 
   const [isAuthLoading, setIsAuthLoading] = useState(true); 
 
   const [sessions, setSessions] = useState<ChatSession[]>([]); 
@@ -117,7 +102,7 @@ export default function App() {
   const [isSidecarOpen, setIsSidecarOpen] = useState(false); 
   
   const [reports, setReports] = useState<ReportPage[]>([
-    { title: '보고서', subtitle: 'BY NOSTRUCT', sections: [] }
+    { title: '보고서', subtitle: 'BY NORUCT', sections: [] }
   ]);
   const [activeReportIndex, setActiveReportIndex] = useState(0); 
   const [reportZoom, setReportZoom] = useState(1);
@@ -125,8 +110,6 @@ export default function App() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
-
-  const currentReport = reports[activeReportIndex] || { title: '보고서', subtitle: 'BY NOSTRUCT', sections: [] };
 
   const scrollRef = useRef<HTMLDivElement>(null); 
   const liveSessionRef = useRef<any>(null); 
@@ -137,6 +120,71 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [searchQuery, setSearchQuery] = useState(''); 
   const reportRef = useRef<HTMLDivElement>(null); 
+  const [isComposing, setIsComposing] = useState(false);
+
+
+  const currentReport = reports[activeReportIndex] || { title: '보고서', subtitle: 'BY NORUCT', sections: [] };
+
+  // === Supabase 데이터 Fetch 함수 ===
+  const fetchUserData = async (userId: string) => {
+    try {
+      // 폴더 불러오기
+      const { data: folderData, error: folderError } = await supabase
+        .from('general_data')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('is_folder', true)
+        .order('updated_at', { ascending: false });
+
+      if (folderError) throw folderError;
+      if (folderData) {
+        const mappedFolders = folderData.map(f => ({
+          ...f,
+          updatedAt: f.updated_at ? new Date(f.updated_at).getTime() : Date.now()
+        })) as Folder[];
+        setFolders(mappedFolders);
+      }
+
+      // 세션(채팅) 불러오기
+      const { data: sessionData, error: sessionError } = await supabase
+        .from('general_data')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('is_folder', false)
+        .order('updated_at', { ascending: false });
+
+      if (sessionError) throw sessionError;
+      if (sessionData) {
+        const mappedSessions = sessionData.map(s => ({
+          ...s,
+          updatedAt: s.updated_at ? new Date(s.updated_at).getTime() : Date.now(),
+          // activeReportIndex는 DB 필드명과 TS 필드명이 일치하므로 자동 매핑됨
+        })) as ChatSession[];
+        setSessions(mappedSessions);
+      }
+    } catch (err) {
+      console.error('데이터 로드 실패:', err);
+    }
+  };
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setCurrentUser(session?.user ?? null);
+      setIsAuthLoading(false);
+      if (session?.user) fetchUserData(session.user.id);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user ?? null);
+      if (session?.user) fetchUserData(session.user.id);
+      else {
+        setSessions([]);
+        setFolders([]);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -157,51 +205,6 @@ export default function App() {
   }, [guestFolders]);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-      setIsAuthLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!currentUser) {
-      setSessions([]);
-      setFolders([]);
-      return;
-    }
-
-    const qSessions = query(
-      collection(db, `users/${currentUser.uid}/sessions`),
-      orderBy('updatedAt', 'desc')
-    );
-    const unsubSessions = onSnapshot(qSessions, (snapshot) => {
-      const loadedSessions: ChatSession[] = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      } as ChatSession));
-      setSessions(loadedSessions);
-    });
-
-    const qFolders = query(
-      collection(db, `users/${currentUser.uid}/folders`),
-      orderBy('updatedAt', 'desc')
-    );
-    const unsubFolders = onSnapshot(qFolders, (snapshot) => {
-      const loadedFolders: Folder[] = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      } as Folder));
-      setFolders(loadedFolders);
-    });
-
-    return () => {
-      unsubSessions();
-      unsubFolders();
-    };
-  }, [currentUser]);
-
-  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -217,16 +220,21 @@ export default function App() {
         activeReportIndex: newIndex, 
         updatedAt: Date.now() 
       } : s));
-    } else {
-      try {
-        await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, activeSessionId), {
-          reports: newReports,
-          activeReportIndex: newIndex,
-          updatedAt: Date.now()
-        });
-      } catch (err) {
-        console.error("Report sync failed:", err);
-      }
+      return;
+    }
+
+    try {
+      const { error } = await supabase.from('general_data').update({
+        reports: newReports,
+        activeReportIndex: newIndex,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', activeSessionId)
+      .eq('is_folder', false);
+      
+      if (error) throw error;
+    } catch (err) {
+      console.error("Report sync failed:", err);
     }
   };
 
@@ -250,21 +258,25 @@ export default function App() {
 
   const handleCreateFolder = async () => {
     const folderName = "제목없는 폴더";
-    const newFolderId = Date.now().toString();
-    const newFolder: Folder = { id: newFolderId, name: folderName, updatedAt: Date.now() };
 
     if (!currentUser) {
       if (guestFolders.length >= 10) return;
-      setGuestFolders(prev => [newFolder, ...prev]);
+      const newFolderId = Date.now().toString();
+      setGuestFolders(prev => [{ id: newFolderId, name: folderName, updatedAt: Date.now() }, ...prev]);
       return;
     }
 
     if (folders.length >= 10) return;
+
     try {
-      await addDoc(collection(db, `users/${currentUser.uid}/folders`), {
+      const { error } = await supabase.from('general_data').insert({
         name: folderName,
-        updatedAt: Date.now()
+        is_folder: true,
+        user_id: currentUser.id,
+        updated_at: new Date().toISOString()
       });
+      if (error) throw error;
+      fetchUserData(currentUser.id);
     } catch (err) {
       console.error("Folder creation failed:", err);
     }
@@ -279,13 +291,16 @@ export default function App() {
     }
 
     try {
-      const sessionsInFolder = sessions.filter(s => s.folderId === id);
-      const batchPromises = sessionsInFolder.map(s => 
-        updateDoc(doc(db, `users/${currentUser.uid}/sessions`, s.id), { folderId: null })
-      );
-      await Promise.all(batchPromises);
-      await deleteDoc(doc(db, `users/${currentUser.uid}/folders`, id));
+      await supabase.from('general_data')
+        .update({ folderId: null })
+        .eq('folderId', id)
+        .eq('is_folder', false);
+
+      const { error } = await supabase.from('general_data').delete().eq('id', id).eq('is_folder', true);
+      if (error) throw error;
+      
       setFolderDeletingId(null);
+      fetchUserData(currentUser.id);
     } catch (err) {
       console.error("Folder deletion failed:", err);
     }
@@ -299,7 +314,13 @@ export default function App() {
     if (!currentUser) {
       setGuestSessions(prev => prev.map(s => s.id === id ? { ...s, title: newTitle } : s));
     } else {
-      await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, id), { title: newTitle });
+      const { error } = await supabase.from('general_data')
+        .update({ title: newTitle, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .eq('is_folder', false);
+
+      if (error) console.error("Session rename failed:", error);
+      fetchUserData(currentUser.id);
     }
     setEditingSessionId(null);
   };
@@ -312,7 +333,12 @@ export default function App() {
     if (!currentUser) {
       setGuestFolders(prev => prev.map(f => f.id === id ? { ...f, name: newName } : f));
     } else {
-      await updateDoc(doc(db, `users/${currentUser.uid}/folders`, id), { name: newName });
+      const { error } = await supabase.from('general_data')
+        .update({ name: newName, updated_at: new Date().toISOString() })
+        .eq('id', id)
+        .eq('is_folder', true);
+      if (error) console.error("Folder rename failed:", error);
+      fetchUserData(currentUser.id);
     }
     setEditingFolderId(null);
   };
@@ -324,11 +350,15 @@ export default function App() {
       return;
     }
     try {
-      await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, sessionId), {
+      const { error } = await supabase.from('general_data').update({
         folderId: folderId,
-        updatedAt: Date.now()
-      });
+        updated_at: new Date().toISOString()
+      }).eq('id', sessionId)
+        .eq('is_folder', false);
+
+      if (error) throw error;
       setActiveMenuId(null);
+      fetchUserData(currentUser.id);
     } catch (err) {
       console.error("Move to folder failed:", err);
     }
@@ -344,7 +374,7 @@ export default function App() {
   };
 
   const addNewReportPage = () => {
-    const newReports = [...reports, { title: '새 보고서', subtitle: 'BY NOSTRUCT', sections: [] }];
+    const newReports = [...reports, { title: '새 보고서', subtitle: 'BY NORUCT', sections: [] }];
     const newIndex = reports.length;
     setReports(newReports);
     setActiveReportIndex(newIndex);
@@ -355,7 +385,7 @@ export default function App() {
     let newReports;
     let newIndex;
     if (reports.length <= 1) {
-      newReports = [{ title: '보고서', subtitle: 'BY NOSTRUCT', sections: [] }];
+      newReports = [{ title: '보고서', subtitle: 'BY NORUCT', sections: [] }];
       newIndex = 0;
     } else {
       newReports = reports.filter((_, i) => i !== activeReportIndex);
@@ -395,7 +425,6 @@ export default function App() {
         const updatedReports = currentReports.map((r, i) => i === currentIndex ? { ...r, title: title || r.title, sections } : r);
         setReports(updatedReports);
         syncReportsToSession(updatedReports, currentIndex);
-        // 사이드카 자동 열림 제거: 사용자의 의도나 수동 조작에 의해서만 열리도록 수정됨
       }
     }
   };
@@ -404,11 +433,10 @@ export default function App() {
     let promptToSend = customPrompt || input;
     if (!promptToSend.trim() && !mediaFile) return;
 
-    // 사용자가 보고서 작성을 요청했는지 여부 확인
     const isReportRequestedByUser = /보고서|작성|정리|기록|report/i.test(promptToSend);
 
     if (isSidecarOpen) {
-      promptToSend += `\n\n(참고: 보고서 모드가 켜져 있습니다. 현재 당신은 '${currentReport.title}' 페이지를 편집 중입니다. 답변 시 핵심 내용을 정리하여 '---REPORT---' 태그와 함께 ## 섹션 제목 형식으로 보고서 내용을 포함해 주세요. 만약 이미지를 생성한다면, 그 이미지는 보고서의 내용과 일치하도록 구성하세요.)`;
+      promptToSend += `\n\n(참고: 보고서 모드가 켜져 있습니다. 현재 당신은 '${currentReport.title}' 페이지를 편집 중입니다. 답변 시 핵심 내용을 정리하여 '---REPORT---' 태그와 함께 ## 섹션 제목 형식으로 보고서 내용을 포함해 주세요.)`;
     }
 
     let sessionId = activeSessionId;
@@ -432,6 +460,7 @@ export default function App() {
 
     const sessionTitle = userMessage.content.length > 30 ? userMessage.content.substring(0, 30) + '...' : userMessage.content || "새로운 대화";
 
+    // 1. 세션 생성/업데이트 (DB 또는 Local)
     if (!currentUser) {
       if (isNewSession) {
         sessionId = Date.now().toString();
@@ -452,24 +481,45 @@ export default function App() {
     } else {
       if (isNewSession) {
         try {
-          const docRef = await addDoc(collection(db, `users/${currentUser.uid}/sessions`), {
-            title: sessionTitle, 
+          const { data, error } = await supabase.from('general_data').insert({
+            title: sessionTitle || "새로운 대화", 
             messages: updatedMessages, 
-            updatedAt: Date.now(), 
+            updated_at: new Date().toISOString(), 
             folderId: null,
             reports: reports,
-            activeReportIndex: activeReportIndex
-          });
-          sessionId = docRef.id;
-          setActiveSessionId(sessionId);
-        } catch (err) { console.error("Session save failed:", err); }
+            activeReportIndex: activeReportIndex || 0,
+            user_id: currentUser.id,
+            name: null,
+            is_folder: false
+          }).select().single();
+          
+          if (error) throw error;
+          if (data) {
+            sessionId = data.id;
+            setActiveSessionId(sessionId);
+            fetchUserData(currentUser.id);
+          }
+        } catch (err) { 
+          console.error("Session save failed:", err); 
+        }
       } else if (sessionId) {
         try {
-          await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, sessionId), { messages: updatedMessages, updatedAt: Date.now() });
-        } catch (err) { console.error("Session update failed:", err); }
+          const { error } = await supabase.from('general_data').update({ 
+            messages: updatedMessages, 
+            updated_at: new Date().toISOString() 
+          })
+          .eq('id', sessionId)
+          .eq('is_folder', false);
+          
+          if (error) throw error;
+          fetchUserData(currentUser.id);
+        } catch (err) { 
+          console.error("Session update failed:", err); 
+        }
       }
     }
 
+    // 2. AI 응답 생성
     try {
       const mediaParts = mediaFile ? [{ inlineData: { mimeType: mediaFile.type, data: mediaFile.data.split(',')[1] } }] : [];
       const result = await generateEducationalResponse(mode, promptToSend, messageHistory, mediaParts);
@@ -478,7 +528,7 @@ export default function App() {
         role: 'model', 
         content: result.text, 
         timestamp: Date.now(), 
-        groundingUrls: result.urls, 
+        groundingUrls: result.urls || [],
         thinking: result.thinking,
         mediaData: result.aiMedia?.data,
         mediaType: result.aiMedia?.mimeType,
@@ -486,30 +536,32 @@ export default function App() {
       };
       
       const finalMessages = [...updatedMessages, modelMessage];
-      
       setMessages(finalMessages);
       setMediaFile(null);
+      
+      // 보고서 파싱
       parseReportContent(result.text, reports, activeReportIndex, result.aiMedia?.data);
 
-      // 사용자가 보고서를 요청했고, 실제로 AI가 보고서 데이터를 생성했다면 사이드카를 자동으로 열어줌
       if (isReportRequestedByUser && result.text.includes('---REPORT---') && !isSidecarOpen) {
         setIsSidecarOpen(true);
       }
 
+      // 3. AI 응답 후 최종 상태 저장
       if (!currentUser) {
         setGuestSessions(prev => prev.map(s => s.id === sessionId ? { ...s, messages: finalMessages, updatedAt: Date.now() } : s));
       } else if (sessionId) {
-        await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, sessionId), { messages: finalMessages, updatedAt: Date.now() });
+        const { error } = await supabase.from('general_data').update({ 
+          messages: finalMessages, 
+          updated_at: new Date().toISOString() 
+        }).eq('id', sessionId).eq('is_folder', false);
+        
+        if (error) throw error;
+        fetchUserData(currentUser.id);
       }
     } catch (error) {
       console.error(error);
       const errorMessage: Message = { role: 'model', content: "오류가 발생했습니다. 연결 상태를 확인하고 다시 시도해 주세요.", timestamp: Date.now() };
       setMessages(prev => [...prev, errorMessage]);
-      if (!currentUser) {
-        setGuestSessions(prev => prev.map(s => s.id === sessionId ? { ...s, messages: [...updatedMessages, errorMessage], updatedAt: Date.now() } : s));
-      } else if (sessionId) {
-        await updateDoc(doc(db, `users/${currentUser.uid}/sessions`, sessionId), { messages: [...updatedMessages, errorMessage], updatedAt: Date.now() });
-      }
     } finally {
       setIsTyping(false);
     }
@@ -521,7 +573,7 @@ export default function App() {
     setMediaFile(null);
     setInput('');
     setIsSidecarOpen(false);
-    setReports([{ title: '보고서', subtitle: 'BY NOSTRUCT', sections: [] }]);
+    setReports([{ title: '보고서', subtitle: 'BY NORUCT', sections: [] }]);
     setActiveReportIndex(0);
   };
 
@@ -529,14 +581,13 @@ export default function App() {
     const session = [...sessions, ...guestSessions].find(s => s.id === id);
     if (session) {
       setActiveSessionId(id);
-      setMessages(session.messages);
+      setMessages(session.messages || []);
       
       if (session.reports && session.reports.length > 0) {
         setReports(session.reports);
-        setActiveReportIndex(session.activeReportIndex || 0);
+        setActiveReportIndex(session.activeReportIndex ?? 0);
       } else {
-        const defaultReports = [{ title: '보고서', subtitle: 'BY NOSTRUCT', sections: [] }];
-        setReports(defaultReports);
+        setReports([{ title: '보고서', subtitle: 'BY NORUCT', sections: [] }]);
         setActiveReportIndex(0);
       }
 
@@ -553,9 +604,16 @@ export default function App() {
       return;
     }
     try {
-      await deleteDoc(doc(db, `users/${currentUser.uid}/sessions`, id));
+      const { error } = await supabase.from('general_data')
+      .delete()
+      .eq('id', id)
+      .eq('is_folder', false);
+
+      if (error) throw error;
+
       if (activeSessionId === id) handleNewChat();
       setActiveMenuId(null);
+      fetchUserData(currentUser.id);
     } catch (err) { console.error("Delete failed:", err); }
   };
 
@@ -572,21 +630,27 @@ export default function App() {
       if (!currentUser) {
         setGuestSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, messages: nextMessages, updatedAt: Date.now() } : s));
       } else {
-        updateDoc(doc(db, `users/${currentUser.uid}/sessions`, activeSessionId), { messages: nextMessages, updatedAt: Date.now() });
+        supabase.from('general_data')
+        .update({ messages: nextMessages, updated_at: new Date().toISOString() })
+        .eq('id', activeSessionId)
+        .eq('is_folder', false)
+        .then(({ error }) => {
+          if (error) console.error("Message delete failed:", error);
+          fetchUserData(currentUser.id);
+        });
       }
     }
   };
 
   const handleLogin = async () => {
     try {
-      await signInWithPopup(auth, googleProvider);
-      setIsLoginModalOpen(false);
+      await supabase.auth.signInWithOAuth({ provider: 'google' });
     } catch (error) { console.error("Login failed:", error); }
   };
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       handleNewChat();
       setIsSettingsMenuOpen(false);
     } catch (error) { console.error("Logout failed:", error); }
@@ -633,7 +697,6 @@ export default function App() {
               sourcesRef.current.add(source);
               source.onended = () => sourcesRef.current.delete(source);
             }
-            if (msg.serverContent?.interrupted) { sourcesRef.current.forEach(s => s.stop()); sourcesRef.current.clear(); nextStartTimeRef.current = 0; }
           },
           onerror: (e) => console.error("Live Error:", e),
           onclose: () => setIsLiveActive(false)
@@ -641,7 +704,7 @@ export default function App() {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
-          systemInstruction: "당신은 NoStruct입니다. 음성을 통해 정확한 학습 지원을 제공하세요."
+          systemInstruction: "당신은 Noruct입니다. 음성을 통해 정확한 학습 지원을 제공하세요."
         }
       });
       liveSessionRef.current = await sessionPromise;
@@ -654,7 +717,7 @@ export default function App() {
 
   const filteredSessions = useMemo(() => {
     if (!searchQuery) return allSessions;
-    return allSessions.filter(s => s.title.toLowerCase().includes(searchQuery.toLowerCase()));
+    return allSessions.filter(s => s.title?.toLowerCase().includes(searchQuery.toLowerCase()));
   }, [allSessions, searchQuery]);
 
   const rootSessions = useMemo(() => filteredSessions.filter(s => !s.folderId), [filteredSessions]);
@@ -664,7 +727,7 @@ export default function App() {
   const showSendButton = input.trim() !== '' || mediaFile !== null;
 
   // === 세션 리스트 아이템 컴포넌트 ===
-  const SessionItem = ({ session }: { session: ChatSession; key?: React.Key }) => (
+  const SessionItem = ({ session }: { session: ChatSession }) => (
     <div className="group/item">
       {editingSessionId === session.id ? (
         <div className="px-2 py-1">
@@ -705,7 +768,6 @@ export default function App() {
         </button>
       )}
 
-      {/* 인라인 드롭다운 메뉴 */}
       <div className={`grid transition-all duration-300 ${activeMenuId === session.id ? 'grid-rows-[1fr] opacity-100 py-2' : 'grid-rows-[0fr] opacity-0 pointer-events-none'}`}>
         <div className="overflow-hidden">
           <div className="bg-slate-100/50 rounded-xl mx-2 p-2 border border-slate-200/50 space-y-1">
@@ -746,6 +808,8 @@ export default function App() {
     </div>
   );
 
+  // ... (상단 import 부분은 동일하므로 생략, 아래 return 부분부터 핵심 수정사항 반영)
+
   return (
     <div className="flex h-screen bg-white text-slate-900 overflow-hidden relative" onClick={() => { setActiveMenuId(null); setFolderDeletingId(null); }}>
       {/* === 사이드바 === */}
@@ -759,7 +823,7 @@ export default function App() {
               <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200">
                 <span className="text-white font-bold text-lg leading-none">N</span>
               </div>
-              <span className="font-bold text-slate-800 tracking-tight text-lg">NoStruct</span>
+              <span className="font-bold text-slate-800 tracking-tight text-lg">Noruct</span>
             </div>
             <button onClick={() => setIsSidebarOpen(false)} className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 transition-colors md:hidden"><ChevronLeftIcon className="w-5 h-5" /></button>
           </div>
@@ -828,7 +892,7 @@ export default function App() {
                           </div>
                         )}
 
-                        <div className={`grid transition-all duration-300 ${folderDeletingId === folder.id ? 'grid-rows-[1fr] opacity-100 py-1' : 'grid-rows-[0fr] opacity-0 pointer-events-none'}`}>
+                        <div className={`grid transition-all duration-300 ${folderDeletingId === folder.id ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'}`}>
                           <div className="overflow-hidden">
                             <div className="bg-red-50 border border-red-100 rounded-xl mx-2 p-3 space-y-2">
                               <div className="flex items-center gap-2 text-red-600">
@@ -868,10 +932,10 @@ export default function App() {
             </div>
             {currentUser ? (
               <div className="bg-white/80 backdrop-blur rounded-2xl p-4 border border-slate-200 shadow-sm mb-6">
-                <div className="flex items-center gap-2 mb-2"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div><span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">NOSTRUCT PRO</span></div>
+                <div className="flex items-center gap-2 mb-2"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div><span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">NORUCT PRO</span></div>
                 <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 bg-blue-50 rounded-full flex items-center justify-center overflow-hidden border border-blue-100">{currentUser.photoURL ? <img src={currentUser.photoURL} className="w-full h-full object-cover" alt="avatar" /> : <UserCircleIcon className="w-5 h-5 text-blue-400" />}</div>
-                  <div className="flex-1 min-w-0"><p className="text-[11px] font-bold text-slate-800 truncate">{currentUser.displayName || 'User'}</p><p className="text-[10px] text-slate-400 truncate">{currentUser.email}</p></div>
+                  <div className="w-7 h-7 bg-blue-50 rounded-full flex items-center justify-center overflow-hidden border border-blue-100">{currentUser.user_metadata?.avatar_url ? <img src={currentUser.user_metadata.avatar_url} className="w-full h-full object-cover" alt="avatar" /> : <UserCircleIcon className="w-5 h-5 text-blue-400" />}</div>
+                  <div className="flex-1 min-w-0"><p className="text-[11px] font-bold text-slate-800 truncate">{currentUser.user_metadata?.full_name || 'User'}</p><p className="text-[10px] text-slate-400 truncate">{currentUser.email}</p></div>
                 </div>
               </div>
             ) : (
@@ -902,7 +966,7 @@ export default function App() {
                 value={editValue}
                 onChange={(e) => setEditValue(e.target.value)}
                 onBlur={() => handleRenameSession(activeSessionId, editValue)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleRenameSession(activeSessionId, editValue); if (e.key === 'Escape') setEditingSessionId(null); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && editingSessionId) handleRenameSession(editingSessionId, editValue); if (e.key === 'Escape') setEditingSessionId(null); }}
                 className="bg-transparent border-b border-blue-500 focus:outline-none text-center font-bold text-slate-800 uppercase tracking-tighter text-sm w-full max-w-xs"
               />
             ) : (
@@ -919,9 +983,39 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 flex-1 justify-end">
-            <button onClick={() => setIsSidecarOpen(!isSidecarOpen)} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all text-xs font-bold ${isSidecarOpen ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-100' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}><DocumentTextIcon className="w-4 h-4" /><span className="hidden sm:inline">보고서</span></button>
-            {currentUser && <div className="hidden md:flex items-center gap-2 pr-2 animate-in fade-in duration-500"><div className="text-right"><p className="text-[11px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1">Authenticated</p><p className="text-[12px] font-bold text-slate-700 leading-none">{currentUser.displayName}</p></div><img src={currentUser.photoURL || ''} className="w-8 h-8 rounded-full border border-slate-200" alt="me" /></div>}
-          </div>
+    <button 
+      onClick={() => setIsSidecarOpen(!isSidecarOpen)} 
+      className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all text-xs font-bold ${
+        isSidecarOpen 
+          ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-100' 
+          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+      }`}
+    >
+      <DocumentTextIcon className="w-4 h-4" />
+      <span className="hidden sm:inline">보고서</span>
+    </button>
+
+    {/*  보고서 버튼 옆 사용자 아이콘 및 로그인 정보
+    {currentUser && (
+      <div className="hidden md:flex items-center gap-2 pr-2 animate-in fade-in duration-500">
+        <div className="text-right">
+          <p className="text-[11px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1">
+            Authenticated
+          </p>
+          <p className="text-[12px] font-bold text-slate-700 leading-none">
+            {currentUser.user_metadata?.full_name}
+          </p>
+        </div>
+        <img
+          src={currentUser.user_metadata?.avatar_url || ''}
+          className="w-8 h-8 rounded-full border border-slate-200"
+          alt="me"
+        />
+      </div>
+    )}
+    */}
+
+    </div>
         </header>
 
         <div className="flex-1 flex overflow-hidden relative">
@@ -932,63 +1026,208 @@ export default function App() {
                   <div className="w-20 h-20 bg-white rounded-[2.5rem] flex items-center justify-center mb-8 ring-1 ring-blue-100 shadow-[0_10px_30px_-5px_rgba(59,130,246,0.15)]">
                     <ChatBubbleLeftRightIcon className="w-10 h-10 text-blue-500" />
                   </div>
-                  <h1 className="text-3xl font-black text-slate-900 mb-3 tracking-tight">NoStruct</h1>
+                  <h1 className="text-3xl font-black text-slate-900 mb-3 tracking-tight">Noruct</h1>
                   <p className="text-slate-500 text-[15px] leading-relaxed font-medium">정확한 학습을 위한 신뢰할 수 있는 학업 동반자입니다.</p>
                 </div>
               )}
+              
               <div className="max-w-3xl mx-auto space-y-12">
-                {messages.map((m, i) => (
-                  <div key={i} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'} animate-in slide-in-from-bottom-6 duration-500`}>
-                    <div className={`relative max-w-[95%] md:max-w-[85%] rounded-[28px] p-6 shadow-sm flex flex-col ${m.role === 'user' ? 'bg-blue-600 text-white shadow-blue-200' : 'bg-white border border-slate-100 text-slate-800 ring-1 ring-slate-200/50'}`}>
-                      {m.thinking && <div className="mb-6 text-[13px] font-medium bg-slate-50 backdrop-blur-sm p-4 rounded-2xl border border-slate-900/5 text-slate-500 italic"><span className="block font-black mb-2 opacity-40 text-[10px] uppercase tracking-widest not-italic">사고 과정</span>{m.thinking}</div>}
-                      
-                      {/* 멀티미디어 렌더링 영역 */}
-                      {m.mediaData && (
-                        <div className="mb-4 rounded-2xl overflow-hidden border border-slate-100 shadow-sm relative group">
-                          {m.type === 'image' && <img src={m.mediaData} className="w-full max-h-[400px] object-contain bg-slate-50" alt="content" />}
-                          {m.type === 'video' && <video src={m.mediaData} controls className="w-full max-h-[400px] bg-black" />}
-                          {m.type === 'audio' && (
-                            <div className="p-4 bg-slate-50 flex items-center gap-3">
-                              <MusicalNoteIcon className="w-6 h-6 text-blue-500" />
-                              <audio src={m.mediaData} controls className="flex-1 h-10" />
-                            </div>
-                          )}
-                          {m.role === 'model' && m.type === 'image' && (
-                            <a href={m.mediaData} download="nostruct-generated.png" className="absolute top-2 right-2 p-2 bg-white/80 backdrop-blur rounded-xl shadow-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white text-slate-600 hover:text-blue-600">
-                                <ArrowDownTrayIcon className="w-5 h-5" />
-                            </a>
-                          )}
-                        </div>
-                      )}
+                {/* 1. 메시지 렌더링 루프 */}
+{messages.map((m, i) => (
+  <div 
+    key={i} 
+    className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'} animate-in slide-in-from-bottom-6 duration-500`}
+  >
+    {m.role === 'user' ? (
+      // 사용자 메시지 – 파란 말풍선 그대로
+      <div 
+        className={`relative max-w-[95%] md:max-w-[85%] rounded-[28px] p-6 shadow-sm flex flex-col bg-blue-600 text-white shadow-blue-200`}
+      >
+        {/* 사고 과정 */}
+        {m.thinking && (
+          <div className="mb-6 text-[13px] font-medium bg-slate-50/30 backdrop-blur-sm p-4 rounded-2xl border border-slate-200/30 text-slate-200 italic">
+            <span className="block font-black mb-2 opacity-40 text-[10px] uppercase tracking-widest not-italic">사고 과정</span>
+            {m.thinking}
+          </div>
+        )}
 
-                      <div className="whitespace-pre-wrap leading-relaxed text-[16px] font-medium tracking-tight mb-4">{m.content}</div>
-                      
-                      <div className={`flex items-center gap-1 pt-3 border-t mt-auto ${m.role === 'user' ? 'justify-end border-blue-500/30' : 'justify-start border-slate-50'}`}>
-                        {m.role === 'user' ? (
-                          <>
-                            <button onClick={() => handleCopyMessage(m.content)} title="복사" className="p-1.5 rounded-lg text-blue-200 hover:text-white hover:bg-blue-500/50 transition-all"><DocumentDuplicateIcon className="w-4 h-4" /></button>
-                            <button onClick={() => handleDeleteMessage(i)} title="삭제" className="p-1.5 rounded-lg text-blue-200 hover:text-white hover:bg-red-500/50 transition-all"><TrashIcon className="w-4 h-4" /></button>
-                          </>
-                        ) : (
-                          <>
-                            <button onClick={() => handleSendMessage(messages[i-1]?.content)} title="재생성" className="p-2 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"><ArrowPathIcon className="w-4 h-4" /></button>
-                            <button title="공유" className="p-2 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"><ShareIcon className="w-4 h-4" /></button>
-                            <button onClick={() => handleCopyMessage(m.content)} title="복사" className="p-2 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all"><DocumentDuplicateIcon className="w-4 h-4" /></button>
-                          </>
-                        )}
-                      </div>
+        {/* 미디어 */}
+        {m.mediaData && (
+          <div className="mb-4 rounded-2xl overflow-hidden border border-slate-100 shadow-sm relative group">
+            {m.type === 'image' && <img src={m.mediaData} className="w-full max-h-[400px] object-contain bg-slate-50" alt="content" />}
+            {m.type === 'video' && <video src={m.mediaData} controls className="w-full max-h-[400px] bg-black" />}
+            {m.type === 'audio' && (
+              <div className="p-4 bg-slate-50 flex items-center gap-3">
+                <MusicalNoteIcon className="w-6 h-6 text-blue-500" />
+                <audio src={m.mediaData} controls className="flex-1 h-10" />
+              </div>
+            )}
+          </div>
+        )}
 
-                      {m.groundingUrls && m.groundingUrls.length > 0 && <div className="mt-6 pt-6 border-t border-slate-100 space-y-2"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sources & Grounding</p><div className="flex flex-wrap gap-2">{m.groundingUrls.map((url, idx) => (<a key={idx} href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-50 hover:bg-blue-50 text-[11px] font-bold text-slate-500 hover:text-blue-600 border border-slate-200 rounded-lg transition-all"><GlobeAltIcon className="w-3 h-3" />{new URL(url).hostname.replace('www.', '')}</a>))}</div></div>}
+        {/* 텍스트 본문 */}
+        <div className="prose prose-invert prose-headings:text-white prose-strong:text-white prose-a:text-blue-200 hover:prose-a:underline max-w-none leading-relaxed text-[16px] font-medium tracking-tight mb-4">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw]}
+          >
+            {m.content}
+          </ReactMarkdown>
+        </div>
+
+        {/* 사용자 액션 버튼 */}
+        <div 
+          className={`flex items-center gap-1 pt-3 border-t mt-auto justify-end border-blue-500/30`}
+        >
+          <button 
+            onClick={() => handleCopyMessage(m.content)} 
+            title="복사" 
+            className="p-1.5 rounded-lg text-blue-200 hover:text-white hover:bg-blue-500/50 transition-all"
+          >
+            <DocumentDuplicateIcon className="w-4 h-4" />
+          </button>
+          <button 
+            onClick={() => handleDeleteMessage(i)} 
+            title="삭제" 
+            className="p-1.5 rounded-lg text-blue-200 hover:text-white hover:bg-red-500/50 transition-all"
+          >
+            <TrashIcon className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    ) : (
+      // AI 메시지 – 하얀 말풍선 제거 + 최대 너비
+      <div className="w-[99%] max-w-[99%] md:max-w-[99%] pl-2 md:pl-4 pr-2 overflow-hidden">
+        {/* 사고 과정 */}
+        {m.thinking && (
+          <div className="mb-5 flex items-start gap-3 text-[13px] font-medium text-slate-600 italic">
+            {/* 텍스트 내용 */}
+            <div className="flex-1">
+              <span className="block text-[10px] font-black uppercase tracking-widest opacity-50 mb-1">
+                사고 과정
+              </span>
+              {m.thinking}
+            </div>
+          </div>
+        )}
+
+        {/* 미디어 */}
+        {m.mediaData && (
+          <div className="mb-5 rounded-2xl overflow-hidden border border-slate-200/60 shadow-sm relative group">
+            {m.type === 'image' && (
+              <>
+                <img src={m.mediaData} className="w-full max-h-[400px] object-contain bg-slate-50" alt="content" />
+                <a 
+                  href={m.mediaData} 
+                  download="generated.png" 
+                  className="absolute top-3 right-3 p-2.5 bg-white/90 backdrop-blur-md rounded-xl shadow-md opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white text-slate-700 hover:text-blue-600"
+                >
+                  <ArrowDownTrayIcon className="w-5 h-5" />
+                </a>
+              </>
+            )}
+            {m.type === 'video' && <video src={m.mediaData} controls className="w-full max-h-[400px] bg-black" />}
+            {m.type === 'audio' && (
+              <div className="p-5 bg-slate-50 flex items-center gap-4">
+                <MusicalNoteIcon className="w-7 h-7 text-blue-500" />
+                <audio src={m.mediaData} controls className="flex-1 h-10" />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 본문 텍스트 + 출처 드롭다운 */}
+        {(() => {
+          const parts = m.content.split('🔗');
+          const mainContent = parts[0].trim();
+          const references = parts.length > 1 ? '🔗' + parts.slice(1).join('🔗').trim() : '';
+
+          return (
+            <>
+              {/* 본문은 항상 보임 */}
+              <div className="prose prose-slate prose-headings:text-slate-900 prose-strong:text-slate-900 prose-a:text-blue-600 hover:prose-a:underline max-w-none break-words [&_a]:break-all [&_pre]:overflow-x-auto leading-relaxed text-[16px] font-medium tracking-tight mb-5">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeRaw]}
+                >
+                  {mainContent}
+                </ReactMarkdown>
+              </div>
+
+              {/* 출처(참고 자료)가 있으면 드롭다운으로 */}
+              {references && (
+                <details className="mt-3 border border-slate-200 rounded-lg overflow-hidden">
+                  <summary className="px-5 py-3 font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 cursor-pointer transition-colors flex items-center justify-between">
+                    <span>참고 자료 / 출처</span>
+                    <span className="text-slate-400 text-sm">▼</span>
+                  </summary>
+                  <div className="
+                  px-5 py-4 bg-white 
+                  prose prose-slate max-w-none 
+                  break-words                   /* 긴 단어 강제 줄바꿈 */
+                  hyphens-auto                  /* 자동 하이픈 */
+                  [&_a]:break-all               /* 링크 강제 줄바꿈 */
+                  [&_a]:underline 
+                  [&_pre]:overflow-x-auto       /* 코드 블록은 가로 스크롤 */
+                  [&_pre]:max-w-full
+                  leading-relaxed text-[15px]
+                  ">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw]}
+                    >
+                      {references}
+                    </ReactMarkdown>
+                  </div>
+                </details>
+              )}
+            </>
+          );
+        })()}
+
+        {/* AI 액션 버튼 */}
+        <div className="flex items-center gap-2 text-slate-500 mt-3">
+          <button 
+            onClick={() => handleSendMessage(messages[i-1]?.content)} 
+            title="재생성" 
+            className="p-2 rounded-xl hover:bg-slate-100 hover:text-blue-600 transition-colors"
+          >
+            <ArrowPathIcon className="w-5 h-5" />
+          </button>
+          <button 
+            title="공유" 
+            className="p-2 rounded-xl hover:bg-slate-100 hover:text-blue-600 transition-colors"
+          >
+            <ShareIcon className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={() => handleCopyMessage(m.content)} 
+            title="복사" 
+            className="p-2 rounded-xl hover:bg-slate-100 hover:text-blue-600 transition-colors"
+          >
+            <DocumentDuplicateIcon className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+    )}
+  </div>
+))}
+
+                {/* 2. 루프 외부 최하단: 타이핑 애니메이션 점3개 애니매이션 */}
+                {isTyping && (
+                  <div className="flex justify-start animate-in fade-in slide-in-from-bottom-2 duration-500 pl-2 md:pl-4">
+                    <div className="flex gap-2 items-center ">
+                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span>
+                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.2s]"></span>
+                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.4s]"></span>
+                      <span className="ml-2 text-[10px] font-black text-slate-300 uppercase tracking-widest">AI Thinking...</span>
                     </div>
                   </div>
-                ))}
-                {isTyping && <div className="flex justify-start"><div className="bg-white border border-slate-100 rounded-3xl px-6 py-5 shadow-sm flex gap-2"><span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span><span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.2s]"></span><span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce [animation-delay:0.4s]"></span></div></div>}
+                )}
               </div>
             </div>
 
-            {/* === 하단 입력칸 및 모드 전환 영역 === */}
             <div className="absolute bottom-10 left-0 right-0 z-20 px-4 md:px-12 pointer-events-none flex flex-col items-center gap-4">
-              {/* 모드 전환 탭 */}
               <div className="bg-white/80 backdrop-blur-xl border border-slate-200/60 p-1 rounded-2xl shadow-xl flex items-center gap-1 pointer-events-auto transition-all animate-in slide-in-from-bottom-2 duration-500">
                 <button onClick={() => setMode(AppMode.CHAT)} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${mode === AppMode.CHAT ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100'}`}><ChatBubbleLeftRightIcon className="w-4 h-4" />학습 대화</button>
                 <button onClick={() => setMode(AppMode.THINKING)} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${mode === AppMode.THINKING ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:bg-slate-100'}`}><LightBulbIcon className="w-4 h-4" />심층 사고</button>
@@ -1042,11 +1281,19 @@ export default function App() {
                   <button onClick={() => fileInputRef.current?.click()} className="p-3.5 rounded-full text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all shrink-0 flex items-center justify-center mb-0.5"><PlusIcon className="w-6 h-6" /></button>
                   
                   <div className="flex-1 min-w-0">
-                    <textarea 
-                      ref={textareaRef}
-                      value={input} 
-                      onChange={(e) => setInput(e.target.value)} 
-                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }} 
+                  <textarea 
+                    ref={textareaRef}
+                    value={input} 
+                    onChange={(e) => setInput(e.target.value)}
+                    onCompositionStart={() => setIsComposing(true)}
+                    onCompositionEnd={() => setIsComposing(false)}
+                    onKeyDown={(e) => {
+                      if (isComposing) return;
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
+                    }}
                       placeholder={
                         mode === AppMode.VISION ? "생성하고 싶은 이미지를 상세히 설명하세요..." :
                         mode === AppMode.SEARCH ? "웹 검색이 필요한 질문을 입력하세요..." :
@@ -1126,10 +1373,10 @@ export default function App() {
                       <div className="text-[15px] leading-relaxed text-slate-700 whitespace-pre-wrap font-medium">{sec.body}</div>
                     </section>
                   )) : (
-                    <div className="h-full flex flex-col items-center justify-center opacity-10 py-20"><DocumentPlusIcon className="w-16 h-16 mb-4" /><p className="text-sm font-black uppercase tracking-widest">보고서 자동 생성 대기 중</p><p className="text-xs font-medium mt-2">대화를 시작하면 선택된 페이지에 내용이 작성됩니다.</p></div>
+                    <div className="h-full flex flex-col items-center justify-center opacity-10 py-20"><DocumentPlusIcon className="w-16 h-16 mb-4" /><p className="text-sm font-black uppercase tracking-widest">보고서 자동 생성 대기 중</p></div>
                   )}
                 </div>
-                <footer className="absolute bottom-16 left-16 right-16 pt-6 border-t border-slate-100 flex items-center justify-between opacity-50"><span className="text-[10px] font-black tracking-widest text-slate-400">NOSTRUCT AI REPORT SYSTEM</span><div className="flex items-center gap-4"><span className="text-[10px] font-black text-slate-400 italic">No hallucinations detected</span><span className="text-[10px] font-black text-slate-400">Verified by Pro Engine</span></div></footer>
+                <footer className="absolute bottom-16 left-16 right-16 pt-6 border-t border-slate-100 flex items-center justify-between opacity-50"><span className="text-[10px] font-black tracking-widest text-slate-400">NORUCT AI REPORT SYSTEM</span><div className="flex items-center gap-4"><span className="text-[10px] font-black text-slate-400 italic">No hallucinations detected</span></div></footer>
               </div>
             </div>
           </div>
@@ -1140,7 +1387,7 @@ export default function App() {
             <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onClick={() => setIsLoginModalOpen(false)} />
             <div className="relative bg-white w-full max-w-md rounded-[32px] p-8 text-center animate-in zoom-in-95 duration-300">
               <div className="w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-8"><span className="text-white font-bold text-2xl">N</span></div>
-              <h2 className="text-2xl font-black mb-10">NoStruct 로그인</h2>
+              <h2 className="text-2xl font-black mb-10">Noruct 로그인</h2>
               <button onClick={handleLogin} className="w-full flex items-center justify-center gap-3 py-4 bg-white border border-slate-200 rounded-2xl font-bold hover:bg-slate-50 transition-all"><img src="https://www.gstatic.com/images/branding/product/1x/gsa_512dp.png" className="w-6 h-6" alt="G" />Google로 로그인하기</button>
             </div>
           </div>
@@ -1156,12 +1403,11 @@ export default function App() {
     </div>
   );
 }
-
 function SidebarLink({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
-    <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] font-bold text-slate-500 hover:bg-white hover:text-slate-900 rounded-xl transition-all">
-      <span className="opacity-70">{icon}</span>
-      {label}
+    <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] font-bold text-slate-500 hover:bg-white hover:text-slate-900 rounded-xl transition-all group">
+      <span className="opacity-70 group-hover:text-blue-600 transition-colors">{icon}</span>
+      <span>{label}</span>
     </button>
   );
 }
